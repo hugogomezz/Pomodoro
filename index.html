@@ -70,7 +70,9 @@
     .icon-btn svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.75; stroke-linecap: round; stroke-linejoin: round; }
     .icon-btn--main { width: 72px; height: 72px; background: var(--glass); color: var(--accent); backdrop-filter: blur(10px); }
     .icon-btn--main svg { width: 28px; height: 28px; fill: currentColor; stroke: none; }
-    .icon-pause { display: none; }
+    .icon-pause, .icon-sound-off { display: none; }
+    body.is-muted .icon-sound-on { display: none; }
+    body.is-muted .icon-sound-off { display: block; }
     body.is-running .icon-play { display: none; }
     body.is-running .icon-pause { display: block; }
 
@@ -117,6 +119,10 @@
 
   <!-- Botones de esquina -->
   <div class="corner">
+    <button class="icon-btn" id="mute" type="button" aria-pressed="true" aria-label="Activar sonido del vídeo" title="Sonido del vídeo (M)">
+      <svg class="icon-sound-on" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/></svg>
+      <svg class="icon-sound-off" viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5 6 9H3v6h3l5 4V5Z"/><path d="m16 9 5 6M21 9l-5 6"/></svg>
+    </button>
     <button class="icon-btn" id="fs" type="button" aria-label="Pantalla completa" title="Pantalla completa (F)">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
     </button>
@@ -175,14 +181,16 @@
       </fieldset>
       <fieldset>
         <legend>Sonido</legend>
-        <label>Campanilla al terminar <input type="checkbox" name="sound"></label>
-        <label>Volumen <input type="range" name="volume" min="0" max="1" step=".05"></label>
+        <label>Sonido al terminar <input type="checkbox" name="sound"></label>
+        <label>Volumen de la campanilla <input type="range" name="volume" min="0" max="1" step=".05"></label>
       </fieldset>
       <fieldset>
         <legend>Fondo</legend>
+        <label>Sonido del vídeo <input type="checkbox" name="videoSound"></label>
+        <label>Volumen del vídeo <input type="range" name="videoVolume" min="0" max="1" step=".05"></label>
         <label>Oscurecer fondo <input type="range" name="dim" min="0" max=".9" step=".05"></label>
         <label>Vídeo <input type="text" name="video" placeholder="URL de YouTube o .mp4"></label>
-        <p class="hint">Pega un enlace de YouTube o la dirección de un archivo de vídeo (.mp4, .webm). Se reproduce en bucle y sin sonido. Déjalo vacío para usar el fondo predeterminado.</p>
+        <p class="hint">Pega un enlace de YouTube o la dirección de un archivo de vídeo (.mp4, .webm). Se reproduce en bucle; el sonido empieza apagado. Déjalo vacío para usar el fondo predeterminado.</p>
       </fieldset>
       <div class="row">
         <button type="button" class="btn" id="restore">Restablecer</button>
@@ -201,11 +209,11 @@
      Pega aquí un enlace de YouTube o la ruta de un .mp4 (por ejemplo "fondo.mp4").
      Déjalo vacío ("") para mostrar solo el fondo neutro.
      Cada usuario puede sustituirlo desde Ajustes → Vídeo. */
-  const DEFAULT_VIDEO = "https://www.youtube.com/watch?v=aRn1hSOL66Q";
+  const DEFAULT_VIDEO = "";
 
   const KEY = "pomodoro:v2";
   const LABELS = { pomodoro: "Pomodoro", short: "Descanso corto", long: "Descanso largo" };
-  const DEFAULTS = { work: 25, short: 5, long: 15, interval: 4, auto: false, sound: true, volume: 0.5, dim: 0.5, video: "" };
+  const DEFAULTS = { work: 25, short: 5, long: 15, interval: 4, auto: false, sound: true, volume: 0.5, videoSound: false, videoVolume: 0.5, dim: 0.5, video: "" };
 
   const Store = {
     today: () => new Date().toISOString().slice(0, 10),
@@ -272,9 +280,24 @@
      ============================================================ */
   const Bg = {
     host: $("media"),
+    media: null,   // <video> o <iframe> actual
+
+    // Aplica sonido y volumen al vídeo; empieza siempre silenciado porque los navegadores bloquean el audio automático
+    applySound() {
+      const m = this.media, on = settings.videoSound, vol = settings.videoVolume;
+      if (!m) return;
+      if (m.tagName === "VIDEO") {
+        m.volume = vol; m.muted = !on;
+        if (on) m.play().catch(() => { m.muted = true; });   // si el navegador lo impide, sigue mudo
+      } else {   // YouTube: se controla con mensajes a su API
+        const cmd = (func, args = []) => m.contentWindow?.postMessage(JSON.stringify({ event: "command", func, args }), "*");
+        if (on) { cmd("unMute"); cmd("setVolume", [Math.round(vol * 100)]); } else cmd("mute");
+      }
+    },
 
     set(url) {
       this.host.innerHTML = "";
+      this.media = null;
       url = (url || "").trim() || DEFAULT_VIDEO;
       if (!url) return;
 
@@ -283,17 +306,19 @@
         // YouTube rechaza (error 153) los embeds sin origen: no funcionan abriendo el archivo con file://
         if (location.protocol === "file:") { console.warn("YouTube necesita http(s): usa GitHub Pages o un servidor local."); return; }
         const f = document.createElement("iframe");
-        f.src = `https://www.youtube-nocookie.com/embed/${yt[1]}?autoplay=1&mute=1&controls=0&loop=1&playlist=${yt[1]}&modestbranding=1&playsinline=1&rel=0`;
+        f.src = `https://www.youtube-nocookie.com/embed/${yt[1]}?autoplay=1&mute=1&controls=0&loop=1&playlist=${yt[1]}&modestbranding=1&playsinline=1&rel=0&enablejsapi=1`;
         f.referrerPolicy = "strict-origin-when-cross-origin";   // imprescindible para que YouTube acepte el embed
         f.allow = "autoplay; encrypted-media"; f.title = "Vídeo de fondo"; f.tabIndex = -1;
-        this.host.append(f);
+        f.addEventListener("load", () => setTimeout(() => this.applySound(), 800));
+        this.host.append(f); this.media = f;
         return;
       }
 
       const v = document.createElement("video");
       Object.assign(v, { src: url, loop: true, muted: true, autoplay: true, playsInline: true });
       v.addEventListener("error", () => v.remove());   // si el archivo no existe, queda el fondo neutro
-      this.host.append(v);
+      v.addEventListener("loadeddata", () => this.applySound());
+      this.host.append(v); this.media = v;
     },
   };
 
@@ -377,11 +402,26 @@
   /* ============================================================
      6. AJUSTES
      ============================================================ */
+  // Refleja en el botón (icono, etiqueta y estado ARIA) si el vídeo tiene sonido
+  function renderSound() {
+    document.body.classList.toggle("is-muted", !settings.videoSound);
+    const b = $("mute");
+    b.setAttribute("aria-pressed", settings.videoSound);
+    b.setAttribute("aria-label", settings.videoSound ? "Silenciar vídeo" : "Activar sonido del vídeo");
+  }
+
+  // Activa o silencia el vídeo de fondo (el clic cuenta como gesto del usuario, así el navegador permite el audio)
+  function toggleSound() {
+    settings.videoSound = !settings.videoSound;
+    Bg.applySound();
+    syncForm(); renderSound(); Store.save();
+  }
+
   function applySettings(fromUser) {
     document.documentElement.style.setProperty("--dim", settings.dim);
     if (fromUser) Snd.unlock();
     if (!state.running) state.remaining = durationMs(state.mode);
-    render(); Store.save();
+    Bg.applySound(); renderSound(); render(); Store.save();
   }
 
   // Rellena el formulario con los valores actuales
@@ -417,6 +457,7 @@
 
   const toggleFullscreen = () => (document.fullscreenElement ? document.exitFullscreen() : document.documentElement.requestFullscreen?.());
   $("fs").addEventListener("click", toggleFullscreen);
+  $("mute").addEventListener("click", toggleSound);
 
   // Atenúa la interfaz tras 4 s sin actividad mientras corre el reloj
   let idleTimer;
@@ -432,6 +473,7 @@
     if (e.code === "Space") { e.preventDefault(); state.running ? pause() : start(); }
     else if (e.key.toLowerCase() === "r") reset();
     else if (e.key.toLowerCase() === "f") toggleFullscreen();
+    else if (e.key.toLowerCase() === "m") toggleSound();
   });
 
   document.addEventListener("visibilitychange", () => state.running && tick());
@@ -440,6 +482,8 @@
      8. INICIO
      ============================================================ */
   Bg.set(settings.video);
+  renderSound();
+  ["pointerdown", "keydown"].forEach((ev) => addEventListener(ev, () => settings.videoSound && Bg.applySound(), { once: true }));
   document.documentElement.style.setProperty("--dim", settings.dim);
   render();
   </script>
